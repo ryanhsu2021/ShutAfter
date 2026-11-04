@@ -11,7 +11,7 @@
     <RootNamespace>ShutAfter</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\ShutAfter.ico</ApplicationIcon>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <AssemblyTitle>ShutAfter</AssemblyTitle>
     <Product>ShutAfter</Product>
     <Description>监控下载完成并自动关机 / 睡眠 / 休眠</Description>

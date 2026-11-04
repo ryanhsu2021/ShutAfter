@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using ShutAfter.Core;
@@ -19,6 +20,9 @@ public partial class MainWindow : Window
 
     private MonitorEngine? _engine;
     private bool _allowClose;
+    private bool _isRunning;
+    private bool _steamUiSync;
+    private static bool _trayHintShown;
     private double _lastProgress;
     private MonitorState _lastState = MonitorState.Idle;
 
@@ -223,7 +227,41 @@ public partial class MainWindow : Window
 
         var want = _cfg.SteamAppId;
         var prefer = string.IsNullOrEmpty(want) ? 0 : _steamAppIds.IndexOf(want);
-        SteamList.SelectedIndex = prefer >= 0 ? prefer : 0;
+
+        // 程序化改选中项会触发 SelectionChanged，这里要静默，否则会被当成用户点击
+        _steamUiSync = true;
+        try
+        {
+            SteamList.SelectedIndex = prefer >= 0 ? prefer : 0;
+        }
+        finally
+        {
+            _steamUiSync = false;
+        }
+    }
+
+    /// <summary>
+    /// 运行中也允许直接点选切换到别的任务：立刻按新目标重启引擎。
+    /// 否则用户点了没反应，界面会显示"监控 Phantom"但蓝条还停在"任意任务"。
+    /// </summary>
+    private void SteamList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_steamUiSync) return;
+
+        var idx = SteamList.SelectedIndex;
+        if (idx < 0 || idx >= _steamAppIds.Count) return;
+
+        var id = _steamAppIds[idx];
+        if (string.Equals(id, _cfg.SteamAppId, StringComparison.OrdinalIgnoreCase)) return;
+
+        _cfg.SteamAppId = id;
+        _cfg.Save();
+
+        if (!_isRunning || ModeSteam.IsChecked != true) return;
+
+        if (!ReadConfig(out _)) return;
+        _engine?.Restart();
+        _lastState = MonitorState.Waiting;
     }
 
     // ---------- 监控控制 ----------
@@ -266,6 +304,8 @@ public partial class MainWindow : Window
 
     private void SetRunningUi(bool running)
     {
+        _isRunning = running;
+
         StartBtn.IsEnabled = !running;
         StopBtn.IsEnabled = running;
         StartBtn.Content = running ? "监控中…" : "开始监控";
@@ -275,7 +315,7 @@ public partial class MainWindow : Window
         ModeFolder.IsEnabled = !running;
 
         ProgramPanel.IsEnabled = !running;
-        SteamPanel.IsEnabled = !running;
+        // Steam 列表运行中保持可点：选中别的任务会立即切换监控目标
         FolderPanel.IsEnabled = !running;
         SignalPanel.IsEnabled = !running;
 
@@ -385,6 +425,10 @@ public partial class MainWindow : Window
     private void Close_Click(object sender, RoutedEventArgs e)
     {
         Hide();
+
+        // 只在本次运行第一次关闭时提示，之后不再打扰
+        if (_trayHintShown) return;
+        _trayHintShown = true;
         App.NotifyPublic("仍在后台运行", "程序已最小化到系统托盘，双击图标可重新打开。");
     }
 

@@ -333,9 +333,10 @@
                         <ListBox x:Name="SteamList" Background="Transparent" BorderThickness="0"
                                  Foreground="#C0C0CE" MaxHeight="150"
                                  ItemContainerStyle="{StaticResource ListItem}"
+                                 SelectionChanged="SteamList_SelectionChanged"
                                  ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
                     </Border>
-                    <TextBlock Text="列出 Steam 正在下载的任务；读 appmanifest 状态，下载、安装、校验全部结束才触发。"
+                    <TextBlock Text="列出 Steam 正在下载的任务；运行中可直接点选切换监控目标。"
                                FontSize="11" Foreground="#5A5A6C" Margin="2,8,0,0" TextWrapping="Wrap"/>
                 </StackPanel>
 

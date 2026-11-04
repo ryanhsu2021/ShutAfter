@@ -127,6 +127,18 @@ public sealed class MonitorEngine : IDisposable
         Publish(MonitorState.Idle, "已停止", "监控已关闭", 0);
     }
 
+    /// <summary>
+    /// 用当前配置重新开始：用于监控中切换目标。
+    /// 不走 Stop()，避免界面闪一下"已停止"。
+    /// </summary>
+    public void Restart()
+    {
+        _running = false;
+        _timer?.Dispose();
+        _timer = null;
+        Start();
+    }
+
     public void Dispose() => Stop();
 
     private void Tick()

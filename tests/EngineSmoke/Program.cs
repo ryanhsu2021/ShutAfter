@@ -26,6 +26,8 @@ internal static class Program
             CaseI_SteamStalledFires();
             CaseJ_SteamScanPerf();
             CaseK_PowerSafety();
+            CaseL_SteamQueueBusy();
+            CaseM_ManifestCache();
         }
         finally
         {
@@ -231,7 +233,16 @@ internal static class Program
 
         var eng = new MonitorEngine(cfg);
         var seen = new System.Collections.Generic.List<string>();
-        eng.StatusChanged += s => { if (s.Detail.Length > 0) seen.Add(s.Detail); };
+        var progress = -1.0;
+        var speed = -1L;
+        var volume = "";
+        eng.StatusChanged += s =>
+        {
+            if (s.Detail.Length > 0) seen.Add(s.Detail);
+            if (s.DownloadProgress >= 0) progress = s.DownloadProgress;
+            if (s.SpeedBytes > 0) speed = s.SpeedBytes;
+            if (s.Volume.Length > 0) volume = s.Volume;
+        };
         eng.Start();
 
         Thread.Sleep(2500);
@@ -243,8 +254,10 @@ internal static class Program
         Console.WriteLine($"        日志速率 {stamp:HH:mm:ss} {rate / 1024.0 / 1024.0:F2} MB/s");
         Console.WriteLine("        状态：" + last);
 
-        Check("H1 状态文本带速率", last.Contains("/s"), last);
-        Check("H2 速率不为 0 B/s", !last.Contains("0 B/s"), last);
+        Check("H1 拿到实时速率字段", speed > 0, $"speed={speed / 1024.0 / 1024.0:F2} MB/s");
+        Check("H2 体积读数非空", volume.Length > 0, "volume=" + volume);
+        Check("H3 进度环拿到真实下载进度", progress > 0 && progress <= 1,
+            progress < 0 ? "DownloadProgress=-1（进度环只能显示静默进度）" : $"progress={progress:P0}");
     }
 
     private static void CaseI_SteamStalledFires()
@@ -323,6 +336,59 @@ internal static class Program
 
         var ok2 = PowerController.Execute(PowerAction.NotifyOnly, false, out var msg2);
         Check("K2 仅提醒保持运行", ok2 && msg2.Contains("保持运行"), msg2);
+    }
+
+    private static void CaseL_SteamQueueBusy()
+    {
+        Console.WriteLine("[L] 「全部任务」：暂停/排队的任务不得挡住判定");
+
+        // 队列里还有未完成任务，但谁都没在收数据 —— 这正是"用户暂停后挂机"的场景
+        Check("L1 有未完成任务但无活动 → 不忙（会触发）",
+            !MonitorEngine.SteamQueueBusy(true, false, false), "busy=false");
+
+        Check("L2 Steam 报速率 → 忙",
+            MonitorEngine.SteamQueueBusy(true, true, false), "busy=true");
+
+        Check("L3 字节增长 → 忙",
+            MonitorEngine.SteamQueueBusy(true, false, true), "busy=true");
+
+        Check("L4 Steam 已退出 → 不忙",
+            !MonitorEngine.SteamQueueBusy(false, true, true), "busy=false");
+    }
+
+    private static void CaseM_ManifestCache()
+    {
+        Console.WriteLine("[M] manifest 缓存：内容不变时不重复解析、结果仍是独立实例");
+
+        var libs = SteamScanner.GetLibraryRoots();
+        if (libs.Count == 0)
+        {
+            Console.WriteLine("  SKIP  没有 Steam 库");
+            return;
+        }
+
+        var first = SteamScanner.ScanApps(libs);
+        if (first.Count == 0)
+        {
+            Console.WriteLine("  SKIP  没有 appmanifest");
+            return;
+        }
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        for (var i = 0; i < 10; i++) SteamScanner.ScanApps(libs);
+        sw.Stop();
+        var perScan = sw.Elapsed.TotalMilliseconds / 10;
+
+        var second = SteamScanner.ScanApps(libs);
+
+        Check("M1 缓存命中后结果一致", first.Count == second.Count,
+            first.Count + " vs " + second.Count);
+        Check("M2 返回独立实例（缓存模板不被改写）",
+            !ReferenceEquals(first[0], second[0]) &&
+            first[0].AppId == second[0].AppId &&
+            first[0].Name == second[0].Name,
+            first[0].AppId + " " + first[0].Name);
+        Check("M3 缓存扫描 < 60ms", perScan < 60, perScan.ToString("F1") + "ms");
     }
 
     private static void WriteChunk(string path, int rounds)

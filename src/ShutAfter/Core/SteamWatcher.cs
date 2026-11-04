@@ -38,18 +38,32 @@ public sealed class SteamApp
     /// </summary>
     public bool FullyInstalled => (StateFlags & 4) != 0;
 
-    public bool IsStaging => BytesToStage > 0 && BytesStaged < BytesToStage;
-
-    public bool InProgress => !FullyInstalled;
-
     public double Progress =>
         BytesToDownload <= 0 ? (FullyInstalled ? 1 : 0)
                              : Math.Clamp((double)BytesDownloaded / BytesToDownload, 0, 1);
+
+    /// <summary>浅拷贝：缓存里的实例是共享模板，调用方拿到的是自己的副本，避免互相污染。</summary>
+    public SteamApp Clone() => new()
+    {
+        AppId = AppId,
+        Name = Name,
+        StateFlags = StateFlags,
+        BytesToDownload = BytesToDownload,
+        BytesDownloaded = BytesDownloaded,
+        BytesToStage = BytesToStage,
+        BytesStaged = BytesStaged,
+        LibraryRoot = LibraryRoot,
+        ManifestPath = ManifestPath
+    };
 }
 
 /// <summary>
 /// 通过 Steam 自己的清单文件判断下载状态，而不是猜磁盘活动。
 /// 库列表来自注册表 SteamPath + steamapps/libraryfolders.vdf。
+///
+/// 资源策略：manifest 只在"文件大小或修改时间变了"时才重新解析。
+/// 一台装了 200 个游戏的机器，如果每秒把 200 个 acf 全读一遍 + 跑 8 次正则，
+/// 光是这一个动作就能吃掉几十毫秒 CPU 和持续的磁盘 IO，而这个值一分钟也变不了几次。
 /// </summary>
 public static class SteamScanner
 {
@@ -61,6 +75,21 @@ public static class SteamScanner
 
     private static readonly Regex NameRegex =
         new("\"name\"\\s+\"([^\"]*)\"", RegexOptions.Compiled);
+
+    private sealed class ManifestCacheEntry
+    {
+        public long Length;
+        public DateTime Stamp;
+        public SteamApp Value = null!;
+    }
+
+    private static readonly Dictionary<string, ManifestCacheEntry> ManifestCache =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private static readonly Dictionary<string, (DateTime At, long Bytes)> StagingCache =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private const int StagingCacheMs = 8000;
 
     /// <summary>Steam 安装根目录（日志、库都在它下面）。找不到返回空串。</summary>
     public static string GetSteamRoot()
@@ -146,22 +175,82 @@ public static class SteamScanner
 
             foreach (var file in files)
             {
-                var app = ParseManifest(file);
+                var app = ReadManifest(file);
                 if (app == null) continue;
+
                 app.LibraryRoot = root;
 
                 // 已完全安装的不用扫暂存目录，省掉绝大多数开销
                 if (!app.FullyInstalled)
-                    app.CachedBytes = GetStagingBytes(root, app.AppId);
+                    app.CachedBytes = GetStagingBytesCached(root, app.AppId);
 
                 list.Add(app);
             }
         }
 
+        if (ManifestCache.Count > list.Count + 64) PruneCache(list);
+
         return list;
     }
 
-    /// <summary>downloading\&lt;appid&gt; 的实际体积。文件数上限 8000，避免超大库拖慢采样。</summary>
+    /// <summary>带缓存的 manifest 读取：文件没变就直接用上次的解析结果。</summary>
+    private static SteamApp? ReadManifest(string path)
+    {
+        long length;
+        DateTime stamp;
+
+        try
+        {
+            var fi = new FileInfo(path);
+            if (!fi.Exists) return null;
+            length = fi.Length;
+            stamp = fi.LastWriteTimeUtc;
+        }
+        catch
+        {
+            return null;
+        }
+
+        if (ManifestCache.TryGetValue(path, out var cached)
+            && cached.Length == length && cached.Stamp == stamp)
+            return cached.Value.Clone();
+
+        var parsed = ParseManifest(path);
+        if (parsed == null) return null;
+
+        ManifestCache[path] = new ManifestCacheEntry { Length = length, Stamp = stamp, Value = parsed };
+        return parsed.Clone();
+    }
+
+    /// <summary>清掉已经不存在的 manifest，避免长期运行后缓存无限增长。</summary>
+    private static void PruneCache(List<SteamApp> current)
+    {
+        var alive = new HashSet<string>(current.Select(a => a.ManifestPath), StringComparer.OrdinalIgnoreCase);
+        var dead = ManifestCache.Keys.Where(k => !alive.Contains(k)).ToList();
+        foreach (var key in dead) ManifestCache.Remove(key);
+    }
+
+    /// <summary>
+    /// downloading\&lt;appid&gt; 的实际体积。文件数上限 8000，避免超大库拖慢采样。
+    /// 8 秒缓存：这个值只用来判断"是否还有暂存数据"，不需要秒级精度，
+    /// 而它每次都要深度遍历整个目录 —— 是单次采样里最贵的一项。
+    /// </summary>
+    public static long GetStagingBytesCached(string libraryRoot, string appId)
+    {
+        if (string.IsNullOrEmpty(appId)) return 0;
+
+        var key = libraryRoot + "|" + appId;
+        var now = DateTime.UtcNow;
+
+        if (StagingCache.TryGetValue(key, out var hit)
+            && (now - hit.At).TotalMilliseconds < StagingCacheMs)
+            return hit.Bytes;
+
+        var bytes = GetStagingBytes(libraryRoot, appId);
+        StagingCache[key] = (now, bytes);
+        return bytes;
+    }
+
     public static long GetStagingBytes(string libraryRoot, string appId)
     {
         if (string.IsNullOrEmpty(appId)) return 0;
@@ -201,43 +290,6 @@ public static class SteamScanner
         }
 
         return total;
-    }
-
-    /// <summary>暂存目录里还有文件说明 Steam 仍在下载/安装/校验。</summary>
-    public static bool HasPendingFiles(string libraryRoot, string appId)    {
-        var dir = Path.Combine(libraryRoot, "steamapps", "downloading");
-        try
-        {
-            if (!Directory.Exists(dir)) return false;
-
-            if (!string.IsNullOrEmpty(appId))
-            {
-                var app = Path.Combine(dir, appId);
-                return Directory.Exists(app) && SafeAny(app);
-            }
-
-            foreach (var d in Directory.EnumerateDirectories(dir))
-                if (SafeAny(d)) return true;
-        }
-        catch
-        {
-            // 目录不可访问时按"没有挂起"处理
-        }
-
-        return false;
-    }
-
-    private static bool SafeAny(string dir)
-    {
-        try
-        {
-            using var e = Directory.EnumerateFileSystemEntries(dir).GetEnumerator();
-            return e.MoveNext();
-        }
-        catch
-        {
-            return false;
-        }
     }
 
     private static SteamApp? ParseManifest(string path)

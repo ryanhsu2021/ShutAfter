@@ -27,6 +27,12 @@ public static class SteamLog
 
     private const int TailBytes = 64 * 1024;
 
+    // 日志被追加时才需要重读；Steam 每 60 秒才写一行速率，
+    // 中间的上百次调用全部走缓存，省掉每秒 64KB 的文件读取 + 正则匹配。
+    private static long _cachedLength = -1;
+    private static DateTime _cachedStamp = DateTime.MinValue;
+    private static string? _cachedText;
+
     /// <summary>读取 Steam 报告的瞬时速率。日志超过 120 秒未更新则视为已停止。</summary>
     public static bool TryGetRate(out long bytesPerSec, out DateTime stamp, out bool fresh)
     {
@@ -81,7 +87,23 @@ public static class SteamLog
         if (root.Length == 0) return null;
 
         var path = Path.Combine(root, "logs", "content_log.txt");
-        if (!File.Exists(path)) return null;
+
+        long length;
+        DateTime stamp;
+        try
+        {
+            var fi = new FileInfo(path);
+            if (!fi.Exists) return null;
+            length = fi.Length;
+            stamp = fi.LastWriteTimeUtc;
+        }
+        catch
+        {
+            return null;
+        }
+
+        if (_cachedText != null && length == _cachedLength && stamp == _cachedStamp)
+            return _cachedText;
 
         try
         {
@@ -99,7 +121,11 @@ public static class SteamLog
             var read = fs.Read(buf, 0, take);
             if (read <= 0) return null;
 
-            return Encoding.UTF8.GetString(buf, 0, read);
+            var text = Encoding.UTF8.GetString(buf, 0, read);
+            _cachedText = text;
+            _cachedLength = length;
+            _cachedStamp = stamp;
+            return text;
         }
         catch
         {

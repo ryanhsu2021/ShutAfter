@@ -7,35 +7,50 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using ShutAfter.Core;
+using ShutAfter.Ui;
 
 namespace ShutAfter;
 
 public partial class MainWindow : Window
 {
     private readonly AppConfig _cfg;
-    private readonly List<string> _programNames = new();
-    private readonly List<string> _steamAppIds = new();
-    private List<string> _steamLibs = new();
+    private readonly SelectableRowList _programRows;
+    private readonly SelectableRowList _steamRows;
+    private readonly Dictionary<string, SolidColorBrush> _brushes = new(StringComparer.OrdinalIgnoreCase);
 
+    private List<string> _steamLibs = new();
     private MonitorEngine? _engine;
     private bool _allowClose;
-    private bool _isRunning;
-    private bool _steamUiSync;
+    private bool _steamUnavailable;
     private static bool _trayHintShown;
-    private double _lastProgress;
     private MonitorState _lastState = MonitorState.Idle;
+    private string _lastSignature = "";
 
     public MainWindow()
     {
         InitializeComponent();
 
+        _programRows = new SelectableRowList(ProgramRows, OnProgramRowSelected);
+        _steamRows = new SelectableRowList(SteamRows, OnSteamRowSelected);
+
         _cfg = App.Config;
         ApplyConfig(_cfg);
 
-        Icon = IconFactory.CreateWindowIcon() ?? Icon;
+        var icon = IconFactory.CreateWindowIcon(32);
+        if (icon != null) Icon = icon;
 
-        ProgressTrack.SizeChanged += (_, _) => ApplyProgress(_lastProgress);
+        // 高 DPI 缩放后工作区可能只有 720 DIP：窗口跟着工作区收口，超出部分交给滚动区，
+        // 保证底部的「开始监控」永远不会被推到屏幕外。
+        MaxHeight = Math.Max(420, SystemParameters.WorkArea.Height - 20);
+
+        Loaded += (_, _) =>
+        {
+            var brand = IconFactory.CreateWindowIcon(28);
+            if (brand != null) BrandIcon.Source = brand;
+            UpdatePlan();
+        };
     }
 
     // ---------- 配置 <-> 界面 ----------
@@ -61,6 +76,7 @@ public partial class MainWindow : Window
         ModeFolder.IsChecked = c.WatchMode == WatchMode.Folder;
 
         ApplyMode();
+        UpdatePlan();
     }
 
     private void Mode_Checked(object sender, RoutedEventArgs e)
@@ -68,6 +84,13 @@ public partial class MainWindow : Window
         // XAML 解析期间控件尚未全部创建
         if (ProgramPanel == null || SteamPanel == null || FolderPanel == null) return;
         ApplyMode();
+        UpdatePlan();
+    }
+
+    private void Act_Checked(object sender, RoutedEventArgs e)
+    {
+        if (PlanText == null) return;
+        UpdatePlan();
     }
 
     private void ApplyMode()
@@ -82,8 +105,19 @@ public partial class MainWindow : Window
         // 细粒度判定信号只对文件夹模式有效
         SignalPanel.Visibility = !program && !steam ? Visibility.Visible : Visibility.Collapsed;
 
+        RescanBtn.Visibility = !program && !steam ? Visibility.Collapsed : Visibility.Visible;
+        TargetMeta.Text = "";
+
         if (program) RefreshPrograms();
-        if (steam) RefreshSteam();
+        else if (steam) RefreshSteam();
+        else
+        {
+            if (string.IsNullOrWhiteSpace(PathBox.Text))
+                PathBox.Text = _cfg.DefaultDownloadPath;
+            TargetMeta.Text = "";
+        }
+
+        UpdateAdvSummary();
     }
 
     private bool ReadConfig(out string error)
@@ -92,33 +126,37 @@ public partial class MainWindow : Window
 
         if (ModeSteam.IsChecked == true)
         {
-            if (_steamAppIds.Count == 0)
+            if (_steamUnavailable)
             {
-                error = "没有检测到可监控的 Steam 任务，请先打开 Steam 并开始下载";
+                error = "没有找到 Steam 安装目录。装了 Steam 的话请先启动一次；否则请改用「文件夹」模式。";
                 return false;
             }
 
-            var idx = SteamList.SelectedIndex;
-            _cfg.SteamAppId = idx >= 0 && idx < _steamAppIds.Count ? _steamAppIds[idx] : "";
+            if (_steamRows.Count == 0)
+            {
+                error = "Steam 队列里没有可监控的任务，请先开始一个下载后点「刷新」。";
+                return false;
+            }
+
+            _cfg.SteamAppId = _steamRows.SelectedId;
             _cfg.WatchMode = WatchMode.Steam;
         }
         else if (ModeProgram.IsChecked == true)
         {
-            var idx = ProgramList.SelectedIndex;
-            if (idx < 0 || idx >= _programNames.Count)
+            if (_programRows.SelectedIndex < 0)
             {
-                error = "请先在上方列表中选择要监控的软件";
+                error = "请先在列表中选择要监控的软件。";
                 return false;
             }
 
-            _cfg.ProgramName = _programNames[idx];
+            _cfg.ProgramName = _programRows.SelectedId;
             _cfg.WatchMode = WatchMode.Program;
         }
         else
         {
             if (string.IsNullOrWhiteSpace(PathBox.Text) || !Directory.Exists(PathBox.Text))
             {
-                error = "请先选择一个存在的下载目录";
+                error = "请先选择一个存在的下载目录。";
                 return false;
             }
 
@@ -151,56 +189,65 @@ public partial class MainWindow : Window
         return Math.Clamp(v, min, max);
     }
 
-    // ---------- 列表刷新 ----------
+    // ---------- 列表 ----------
 
     private void RefreshPrograms()
     {
         var want = _cfg.ProgramName;
         var apps = ProgramScanner.GetCandidates();
 
-        ProgramList.Items.Clear();
-        _programNames.Clear();
+        _programRows.Clear();
 
         foreach (var a in apps)
-        {
-            ProgramList.Items.Add(a.Display);
-            _programNames.Add(a.Name);
-        }
+            _programRows.Add(a.Name, a.Name, Trim(a.Title, 42));
 
-        if (_programNames.Count == 0)
+        if (_programRows.Count == 0)
         {
-            ProgramHint.Text = "没有找到可监控的程序，请先运行下载软件后点刷新";
+            _programRows.AddHint("没有找到可监控的程序。先运行下载软件，再点右上角「刷新」。");
+            TargetMeta.Text = "0 个候选";
             return;
         }
 
-        ProgramHint.Text = $"共 {_programNames.Count} 个候选程序";
+        TargetMeta.Text = apps.Count + " 个候选";
+        _programRows.Select(IndexOf(_programRows, want));
+    }
 
-        var prefer = _programNames.FindIndex(n => string.Equals(n, want, StringComparison.OrdinalIgnoreCase));
-        ProgramList.SelectedIndex = prefer >= 0 ? prefer : 0;
+    private static string Trim(string text, int max) =>
+        string.IsNullOrEmpty(text) ? "" : (text.Length <= max ? text : text[..max] + "…");
+
+    private static int IndexOf(SelectableRowList rows, string id)
+    {
+        if (string.IsNullOrEmpty(id)) return -1;
+
+        for (var i = 0; i < rows.Count; i++)
+            if (string.Equals(rows.IdAt(i), id, StringComparison.OrdinalIgnoreCase))
+                return i;
+
+        return -1;
     }
 
     private void RefreshSteam()
     {
         _steamLibs = SteamScanner.GetLibraryRoots();
+        _steamUnavailable = _steamLibs.Count == 0;
+        _steamRows.Clear();
 
-        SteamList.Items.Clear();
-        _steamAppIds.Clear();
-
-        if (_steamLibs.Count == 0)
+        if (_steamUnavailable)
         {
-            SteamLibText.Text = "未检测到 Steam 库";
-            SteamList.Items.Add("未找到 Steam 安装目录");
-            _steamAppIds.Add("");
+            _steamRows.AddHint("没有找到 Steam 库。请确认 Steam 已安装并至少启动过一次。");
+            TargetMeta.Text = "未检测到";
+            SteamHint.Text = "找不到 steamapps 目录";
             return;
         }
 
-        var drives = string.Join(" / ", _steamLibs
-            .Select(p => Path.GetPathRoot(p)?.TrimEnd('\\') ?? p)
-            .Distinct(StringComparer.OrdinalIgnoreCase));
+        var drives = new List<string>();
+        foreach (var p in _steamLibs)
+        {
+            var root = Path.GetPathRoot(p)?.TrimEnd('\\') ?? p;
+            if (!drives.Any(d => string.Equals(d, root, StringComparison.OrdinalIgnoreCase)))
+                drives.Add(root);
+        }
 
-        SteamLibText.Text = $"已识别 {_steamLibs.Count} 个库（{drives}）";
-
-        // 只列未完成的任务，已安装完的不占位置
         SteamLog.TryGetRate(out var rate, out _, out var fresh);
         var speed = fresh ? Math.Max(0, rate) : 0;
 
@@ -210,58 +257,162 @@ public partial class MainWindow : Window
             .ThenBy(a => a.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        SteamList.Items.Add("任意任务　·　任一游戏下载完成即触发");
-        _steamAppIds.Add("");
-
+        // 两层目标：整个队列 / 某个具体任务
+        _steamRows.Add("全部任务", "", "队列里没有任务在收数据时触发");
         foreach (var a in active)
-        {
-            SteamList.Items.Add(MonitorEngine.DescribeApp(a, speed));
-            _steamAppIds.Add(a.AppId);
-        }
+            _steamRows.Add(a.Name, a.AppId, SteamRowMeta(a, speed));
+
+        TargetMeta.Text = $"{_steamLibs.Count} 库 · {drives.Count} 盘 · {active.Count} 未完成";
 
         if (active.Count == 0)
+            _steamRows.AddHint("队列里暂时没有未完成的下载。开始下载后点「刷新」。");
+
+        // 选中项只有一个来源：配置里的目标；目标已不在列表里就落回「全部任务」
+        var index = IndexOf(_steamRows, _cfg.SteamAppId);
+        _steamRows.Select(index);
+
+        var resolved = _steamRows.SelectedId;
+        if (!string.Equals(resolved, _cfg.SteamAppId, StringComparison.OrdinalIgnoreCase))
         {
-            SteamList.Items.Add("（暂无进行中的下载，开始下载后点「重新扫描」）");
-            _steamAppIds.Add("");
+            _cfg.SteamAppId = resolved;
+            _cfg.Save();
         }
 
-        var want = _cfg.SteamAppId;
-        var prefer = string.IsNullOrEmpty(want) ? 0 : _steamAppIds.IndexOf(want);
+        UpdateSteamHint();
+    }
 
-        // 程序化改选中项会触发 SelectionChanged，这里要静默，否则会被当成用户点击
-        _steamUiSync = true;
+    private void UpdateSteamHint()
+    {
+        SteamHint.Text = _cfg.SteamAppId.Length == 0
+            ? "全部任务：队列里所有下载都不再收数据时才触发，暂停/排队的任务不会卡住判定。"
+            : "只等这一个任务：其他任务下完不会触发。";
+    }
+
+    /// <summary>Steam 行的副标题：只放真实有用的三个信息（速率 / 体积 / 是否暂停）。</summary>
+    private static string SteamRowMeta(SteamApp a, long speed)
+    {
+        var parts = new List<string>();
+
+        if (speed > 0 && a.HasStaging)
+            parts.Add("↓ " + MonitorEngine.FormatSize(speed) + "/s");
+
+        if (a.BytesToDownload > 0 && a.BytesDownloaded > 0)
+            parts.Add(MonitorEngine.FormatSize(a.BytesDownloaded) + " / " + MonitorEngine.FormatSize(a.BytesToDownload));
+        else if (a.CachedBytes > 0)
+            parts.Add("已缓存 " + MonitorEngine.FormatSize(a.CachedBytes));
+
+        if (a.HasStaging && speed <= 0)
+            parts.Add("已暂停");
+
+        return parts.Count == 0 ? "等待 Steam 回报状态" : string.Join("  ·  ", parts);
+    }
+
+    private void OnSteamRowSelected(int index)
+    {
+        _cfg.SteamAppId = _steamRows.IdAt(index);
+        _cfg.Save();
+
+        UpdateSteamHint();
+        UpdatePlan();
+    }
+
+    private void OnProgramRowSelected(int index)
+    {
+        _cfg.ProgramName = _programRows.IdAt(index);
+        _cfg.Save();
+        UpdatePlan();
+    }
+
+    // ---------- 计划摘要 ----------
+
+    private string ActionLabel() =>
+        ActSleep.IsChecked == true ? "睡眠"
+        : ActHibernate.IsChecked == true ? "休眠"
+        : ActNotify.IsChecked == true ? "仅提醒"
+        : "关机";
+
+    private string TargetLabel()
+    {
+        if (ModeSteam.IsChecked == true)
+        {
+            if (_steamRows.SelectedIndex < 0) return "Steam";
+            return _steamRows.SelectedIndex == 0
+                ? "Steam 全部任务"
+                : "Steam · " + _steamRows.TitleAt(_steamRows.SelectedIndex);
+        }
+
+        if (ModeProgram.IsChecked == true)
+            return _programRows.SelectedIndex < 0
+                ? "未选择软件"
+                : _programRows.TitleAt(_programRows.SelectedIndex);
+
+        var path = (PathBox.Text ?? "").TrimEnd('\\');
+        if (path.Length == 0) return "未选择目录";
         try
         {
-            SteamList.SelectedIndex = prefer >= 0 ? prefer : 0;
+            var name = Path.GetFileName(path);
+            return name.Length > 0 ? name : path;
         }
-        finally
+        catch
         {
-            _steamUiSync = false;
+            return path;
         }
     }
 
-    /// <summary>
-    /// 运行中也允许直接点选切换到别的任务：立刻按新目标重启引擎。
-    /// 否则用户点了没反应，界面会显示"监控 Phantom"但蓝条还停在"任意任务"。
-    /// </summary>
-    private void SteamList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private static string HumanSeconds(int seconds) =>
+        seconds % 60 == 0 ? (seconds / 60) + " 分钟" : seconds + " 秒";
+
+    private void UpdatePlan()
     {
-        if (_steamUiSync) return;
+        if (PlanText == null) return;
 
-        var idx = SteamList.SelectedIndex;
-        if (idx < 0 || idx >= _steamAppIds.Count) return;
+        var quiet = ParseInt(QuietBox.Text, _cfg.QuietSeconds, 10, 1800);
+        var grace = ParseInt(GraceBox.Text, _cfg.GraceSeconds, 5, 600);
+        var drill = CkDrill.IsChecked == true;
+        var action = ActionLabel();
 
-        var id = _steamAppIds[idx];
-        if (string.Equals(id, _cfg.SteamAppId, StringComparison.OrdinalIgnoreCase)) return;
+        PlanText.Text = drill
+            ? $"{TargetLabel()}　·　静默 {HumanSeconds(quiet)}　·　演练：不会真正{action}"
+            : $"{TargetLabel()}　·　静默 {HumanSeconds(quiet)}　·　宽限 {grace}s　·　完成后{action}";
 
-        _cfg.SteamAppId = id;
-        _cfg.Save();
+        if (drill)
+        {
+            PlanBadge.Background = MakeBrush("#2A2314");
+            PlanBadge.BorderBrush = MakeBrush("#4C3B16");
+            PlanBadgeText.Foreground = MakeBrush("#E3B65C");
+            PlanBadgeText.Text = "演练";
+        }
+        else if (action == "仅提醒")
+        {
+            PlanBadge.Background = MakeBrush("#16233D");
+            PlanBadge.BorderBrush = MakeBrush("#2B4C86");
+            PlanBadgeText.Foreground = MakeBrush("#9CC0FF");
+            PlanBadgeText.Text = "仅提醒";
+        }
+        else
+        {
+            PlanBadge.Background = MakeBrush("#152A22");
+            PlanBadge.BorderBrush = MakeBrush("#22503F");
+            PlanBadgeText.Foreground = MakeBrush("#63D3A5");
+            PlanBadgeText.Text = "真实执行";
+        }
 
-        if (!_isRunning || ModeSteam.IsChecked != true) return;
+        UpdateAdvSummary();
+    }
 
-        if (!ReadConfig(out _)) return;
-        _engine?.Restart();
-        _lastState = MonitorState.Waiting;
+    private void UpdateAdvSummary()
+    {
+        if (AdvToggle == null || QuietBox == null) return;
+
+        var quiet = ParseInt(QuietBox.Text, _cfg.QuietSeconds, 10, 1800);
+        var grace = ParseInt(GraceBox.Text, _cfg.GraceSeconds, 5, 600);
+        var signals = (CkTemp?.IsChecked == true ? 1 : 0) + (CkHandle?.IsChecked == true ? 1 : 0)
+                      + (CkRecursive?.IsChecked == true ? 1 : 0) + (CkProcIo?.IsChecked == true ? 1 : 0);
+
+        var folder = ModeFolder.IsChecked == true;
+        AdvToggle.Tag = folder
+            ? $"静默 {HumanSeconds(quiet)} · 宽限 {grace}s · {signals} 项信号"
+            : $"静默 {HumanSeconds(quiet)} · 宽限 {grace}s";
     }
 
     // ---------- 监控控制 ----------
@@ -274,7 +425,7 @@ public partial class MainWindow : Window
 
         if (!ReadConfig(out var err))
         {
-            MessageBox.Show(this, err, "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
+            MessageBox.Show(this, err, "还不能开始", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
 
@@ -283,16 +434,20 @@ public partial class MainWindow : Window
         _engine.Completed -= OnCompleted;
         _engine.StatusChanged += OnStatus;
         _engine.Completed += OnCompleted;
+
+        _lastSignature = "";
+        _lastState = MonitorState.Waiting;
         _engine.Start();
 
         SetRunningUi(true);
-        _lastState = MonitorState.Waiting;
+        UpdatePlan();
     }
 
     public void StopMonitoring()
     {
         _engine?.Stop();
         SetRunningUi(false);
+        UpdatePlan();
     }
 
     public void ShutdownEngine()
@@ -304,8 +459,6 @@ public partial class MainWindow : Window
 
     private void SetRunningUi(bool running)
     {
-        _isRunning = running;
-
         StartBtn.IsEnabled = !running;
         StopBtn.IsEnabled = running;
         StartBtn.Content = running ? "监控中…" : "开始监控";
@@ -313,14 +466,17 @@ public partial class MainWindow : Window
         ModeProgram.IsEnabled = !running;
         ModeSteam.IsEnabled = !running;
         ModeFolder.IsEnabled = !running;
+        RescanBtn.IsEnabled = !running;
 
         ProgramPanel.IsEnabled = !running;
-        // Steam 列表运行中保持可点：选中别的任务会立即切换监控目标
         FolderPanel.IsEnabled = !running;
-        SignalPanel.IsEnabled = !running;
 
-        QuietBox.IsEnabled = !running;
-        GraceBox.IsEnabled = !running;
+        // Steam 列表保持可滚动，但选中项锁定在正在监控的那一个
+        _steamRows.Locked = running;
+        _programRows.Locked = running;
+
+        ThresholdPanel.IsEnabled = !running;
+        SignalPanel.IsEnabled = !running;
         CkDrill.IsEnabled = !running;
 
         ActShutdown.IsEnabled = !running;
@@ -328,7 +484,8 @@ public partial class MainWindow : Window
         ActHibernate.IsEnabled = !running;
         ActNotify.IsEnabled = !running;
 
-        HeaderHint.Text = running ? "· 运行中" : "· 未运行";
+        if (running) SteamHint.Text = "监控中：目标已锁定，需要更换请先点「停止」。";
+        else UpdateSteamHint();
     }
 
     // ---------- 引擎回调 ----------
@@ -343,7 +500,7 @@ public partial class MainWindow : Window
                 Show();
                 if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
                 Activate();
-                App.NotifyPublic("下载已完成", "即将" + PowerController.Label(_cfg.Action) + "，可点击「停止」取消。");
+                App.NotifyPublic("下载已完成", "即将" + PowerController.Label(_cfg.Action) + "，点「停止」可取消。");
             }
 
             if (s.State == MonitorState.Finished || s.State == MonitorState.Idle)
@@ -356,23 +513,66 @@ public partial class MainWindow : Window
 
     private void ApplyStatus(EngineStatus s)
     {
+        // 同一秒内没变化就不重排界面，减少无谓的布局开销
+        // 等待阶段的秒数不展示，也不该触发重绘
+        var idleKey = s.State is MonitorState.Waiting or MonitorState.Idle ? 0 : s.IdleSeconds;
+        var signature = string.Join("|", s.State, s.Headline, s.Detail, s.Reason, s.Volume,
+            s.SpeedBytes, (int)(s.Progress * 400), idleKey);
+        if (signature == _lastSignature) return;
+        _lastSignature = signature;
+
         StateText.Text = s.Headline;
-        StateDetail.Text = s.Detail;
-        ReasonText.Text = "判定依据：" + (string.IsNullOrEmpty(s.Reason) ? "—" : s.Reason);
-        StateSize.Text = s.TotalSize == "0 B" ? "" : "目录 " + s.TotalSize;
+        StateDetail.Text = string.IsNullOrWhiteSpace(s.Detail) ? "—" : s.Detail;
 
         var brush = MakeBrush(s.Accent);
         StateDot.Background = brush;
-        ProgressFill.Background = brush;
+        Ring.AccentBrush = brush;
+        AnimateRing(s.Progress);
 
-        ApplyProgress(s.Progress);
+        RingValue.Text = s.State switch
+        {
+            MonitorState.Waiting => "—",
+            _ => ((int)Math.Round(s.Progress * 100)) + "%"
+        };
+
+        RingCaption.Text = s.State switch
+        {
+            MonitorState.Waiting => "待开始",
+            MonitorState.Monitoring => "静默",
+            MonitorState.Countdown => "倒计时",
+            MonitorState.Finished => "完成",
+            _ => "待机"
+        };
+
+        MetricSpeed.Text = s.SpeedBytes < 0 ? "—"
+            : s.SpeedBytes == 0 ? "静止"
+            : MonitorEngine.FormatSize(s.SpeedBytes) + "/s";
+
+        MetricVolume.Text = string.IsNullOrWhiteSpace(s.Volume) ? "—" : s.Volume;
+
+        MetricIdle.Text = s.State == MonitorState.Idle || s.State == MonitorState.Waiting
+            ? "—"
+            : FormatClock(s.IdleSeconds);
+
+        ReasonText.Text = string.IsNullOrWhiteSpace(s.Reason) ? "—" : s.Reason;
     }
 
-    private void ApplyProgress(double progress)
+    private void AnimateRing(double target)
     {
-        _lastProgress = Math.Clamp(progress, 0, 1);
-        var w = ProgressTrack.ActualWidth * _lastProgress;
-        ProgressFill.Width = w <= 0 ? 0 : w;
+        var anim = new DoubleAnimation(Math.Clamp(target, 0, 1), TimeSpan.FromMilliseconds(420))
+        {
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+        };
+
+        Ring.BeginAnimation(ProgressRing.ValueProperty, anim);
+    }
+
+    private static string FormatClock(int seconds)
+    {
+        if (seconds < 0) return "—";
+        if (seconds < 60) return seconds + "s";
+        if (seconds < 3600) return (seconds / 60) + "m" + (seconds % 60).ToString("00") + "s";
+        return (seconds / 3600) + "h" + (seconds % 3600 / 60).ToString("00") + "m";
     }
 
     private void OnCompleted(PowerAction action)
@@ -381,6 +581,7 @@ public partial class MainWindow : Window
         {
             var ok = PowerController.Execute(action, _cfg.DrillMode, out var message);
             SetRunningUi(false);
+            UpdatePlan();
 
             if (!_cfg.DrillMode && _cfg.Action != PowerAction.NotifyOnly)
             {
@@ -398,26 +599,39 @@ public partial class MainWindow : Window
         }));
     }
 
-    private static SolidColorBrush MakeBrush(string hex)
+    private SolidColorBrush MakeBrush(string hex)
     {
+        if (_brushes.TryGetValue(hex, out var cached)) return cached;
+
+        SolidColorBrush brush;
         try
         {
-            var c = (Color)ColorConverter.ConvertFromString(hex);
-            var b = new SolidColorBrush(c);
-            b.Freeze();
-            return b;
+            brush = new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex));
         }
         catch
         {
-            return new SolidColorBrush(Colors.Gray);
+            brush = new SolidColorBrush(Colors.Gray);
         }
+
+        brush.Freeze();
+        _brushes[hex] = brush;
+        return brush;
     }
 
     // ---------- 窗口交互 ----------
 
     private void Header_MouseDown(object sender, MouseButtonEventArgs e)
     {
-        if (e.LeftButton == MouseButtonState.Pressed) DragMove();
+        if (e.LeftButton != MouseButtonState.Pressed) return;
+
+        try
+        {
+            DragMove();
+        }
+        catch
+        {
+            // 鼠标在拖动过程中释放会抛异常，忽略即可
+        }
     }
 
     private void Min_Click(object sender, RoutedEventArgs e) => Hide();
@@ -455,20 +669,141 @@ public partial class MainWindow : Window
         };
 
         if (dlg.ShowDialog() == System.Windows.Forms.DialogResult.OK)
+        {
             PathBox.Text = dlg.SelectedPath;
+            UpdatePlan();
+        }
     }
 
-    private void RescanPrograms_Click(object sender, RoutedEventArgs e) => RefreshPrograms();
-
-    private void RescanSteam_Click(object sender, RoutedEventArgs e) => RefreshSteam();
+    private void Rescan_Click(object sender, RoutedEventArgs e)
+    {
+        if (ModeProgram.IsChecked == true) RefreshPrograms();
+        else if (ModeSteam.IsChecked == true) RefreshSteam();
+        UpdatePlan();
+    }
 
     private void Start_Click(object sender, RoutedEventArgs e) => StartMonitoring();
 
     private void Stop_Click(object sender, RoutedEventArgs e) => StopMonitoring();
 
     private void QuietBox_LostFocus(object sender, RoutedEventArgs e)
-        => QuietBox.Text = ParseInt(QuietBox.Text, 90, 10, 1800).ToString();
+    {
+        QuietBox.Text = ParseInt(QuietBox.Text, _cfg.QuietSeconds, 10, 1800).ToString();
+        UpdatePlan();
+    }
 
     private void GraceBox_LostFocus(object sender, RoutedEventArgs e)
-        => GraceBox.Text = ParseInt(GraceBox.Text, 60, 5, 600).ToString();
+    {
+        GraceBox.Text = ParseInt(GraceBox.Text, _cfg.GraceSeconds, 5, 600).ToString();
+        UpdatePlan();
+    }
+
+    /// <summary>数值框里按回车即时生效（不等焦点离开）。</summary>
+    private void NumBox_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter) return;
+        e.Handled = true;
+        Keyboard.ClearFocus();
+    }
+
+    private void Drill_Checked(object sender, RoutedEventArgs e)
+    {
+        if (PlanText == null) return;
+        UpdatePlan();
+    }
+
+    private void Adv_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (AdvPanel == null) return;
+
+        var open = AdvToggle.IsChecked == true;
+        AdvPanel.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
+
+        if (open)
+        {
+            AdvPanel.BeginAnimation(OpacityProperty,
+                new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(160)));
+        }
+    }
+
+    // ---------- 设计校对用（--shot） ----------
+
+    /// <summary>把状态卡填充成指定场景，仅用于界面截图校对，不参与正常运行。</summary>
+    public void PreviewForShot(string kind)
+    {
+        if (kind == "advanced")
+        {
+            AdvToggle.IsChecked = true;
+            Adv_Toggled(AdvToggle, new RoutedEventArgs());
+        }
+
+        if (kind == "folder")
+        {
+            ModeFolder.IsChecked = true;
+            AdvToggle.IsChecked = true;
+            Adv_Toggled(AdvToggle, new RoutedEventArgs());
+            return;
+        }
+
+        if (kind == "program")
+        {
+            ModeProgram.IsChecked = true;
+            return;
+        }
+
+        var state = kind switch
+        {
+            "monitoring" => MonitorState.Monitoring,
+            "countdown" => MonitorState.Countdown,
+            "finished" => MonitorState.Finished,
+            "waiting" => MonitorState.Waiting,
+            "advanced" => MonitorState.Monitoring,
+            _ => MonitorState.Idle
+        };
+
+        if (state == MonitorState.Idle)
+        {
+            UpdatePlan();
+            return;
+        }
+
+        var status = state switch
+        {
+            MonitorState.Monitoring => new EngineStatus
+            {
+                State = state, Headline = "监控中",
+                Detail = "Steam 正在下载《Subnautica》",
+                Reason = "Steam 回报 12.4 MB/s，队列还有 2 个未完成",
+                Progress = 0.24, DownloadProgress = 0.46, Accent = "#4C8DFF",
+                SpeedBytes = (long)(12.4 * 1024 * 1024), Volume = "3.21 GB / 6.94 GB",
+                IdleSeconds = 72
+            },
+            MonitorState.Countdown => new EngineStatus
+            {
+                State = state, Headline = "即将关机",
+                Detail = "剩余 41 秒，期间恢复下载会自动取消",
+                Reason = "目录已静止 331 秒，超过静默阈值",
+                Progress = 0.32, Accent = "#EF9F27",
+                SpeedBytes = 0, Volume = "12.8 GB", IdleSeconds = 331
+            },
+            MonitorState.Finished => new EngineStatus
+            {
+                State = state, Headline = "下载已完成",
+                Detail = "已执行：关机（30 秒内可 shutdown /a 撤销）",
+                Reason = "Steam 已标记为完全安装",
+                Progress = 1, Accent = "#3DDC97",
+                SpeedBytes = 0, Volume = "6.94 GB", IdleSeconds = 368
+            },
+            _ => new EngineStatus
+            {
+                State = state, Headline = "等待下载开始",
+                Detail = "已锁定 Steam 队列，一旦有任务收数据即开始判定",
+                Reason = "尚未观测到任何写入活动",
+                Progress = 0, Accent = "#8A8A99", SpeedBytes = -1,
+                Volume = "—", IdleSeconds = 0
+            }
+        };
+
+        ApplyStatus(status);
+    }
 }

@@ -114,6 +114,8 @@ public sealed class AppConfig
 
         if (SteamAppId == null) SteamAppId = "";
         SteamAppId = SteamAppId.Trim();
+        // 旧版本用 "*" 表示"任一任务"，该选项已移除，按"全部任务"处理
+        if (SteamAppId == "*") SteamAppId = "";
 
         if (ProgramName == null) ProgramName = "";
         ProgramName = ProgramName.Trim();

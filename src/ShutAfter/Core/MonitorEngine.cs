@@ -447,8 +447,14 @@ public sealed class MonitorEngine : IDisposable
             // 换了监控目标：锚点重来，上一个任务的累加量不能带过来
             _steamRatioAppId = app.AppId;
             _steamAnchorBytes = app.BytesDownloaded;
-            _steamExtraBytes = 0;
-            _steamAccrualAt = DateTime.MinValue;
+
+            // manifest 里的字节数可能已经是几十甚至上百分之前的（Steam 下载中几乎不写它）。
+            // 光从这一刻开始累加，起点就比 Steam 客户端低一大截，所以先用日志把它写入之后的量补回来。
+            _steamExtraBytes = app.ManifestWriteUtc == DateTime.MinValue
+                ? 0
+                : SteamLog.BytesBetween(app.ManifestWriteUtc, now);
+
+            _steamAccrualAt = now;
         }
         else if (app.BytesDownloaded > _steamAnchorBytes)
         {

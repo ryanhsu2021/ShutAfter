@@ -19,6 +19,12 @@ public sealed class SteamApp
     public string LibraryRoot { get; set; } = "";
     public string ManifestPath { get; init; } = "";
 
+    /// <summary>
+    /// appmanifest 的最后写入时刻。Steam 下载中几乎不写这个文件，实测可以一个多小时不动，
+    /// 这个时间戳就是 manifest 里字节数的"保质期起点"，用来把之后的下载量补回来。
+    /// </summary>
+    public DateTime ManifestWriteUtc { get; init; }
+
     /// <summary>本次采样周期内的下载增量，用于显示实时速度；由引擎写入。</summary>
     public long SpeedBytes { get; set; }
 
@@ -53,7 +59,8 @@ public sealed class SteamApp
         BytesToStage = BytesToStage,
         BytesStaged = BytesStaged,
         LibraryRoot = LibraryRoot,
-        ManifestPath = ManifestPath
+        ManifestPath = ManifestPath,
+        ManifestWriteUtc = ManifestWriteUtc
     };
 }
 
@@ -299,6 +306,16 @@ public static class SteamScanner
             var text = File.ReadAllText(path);
             if (text.Length == 0) return null;
 
+            DateTime writeUtc;
+            try
+            {
+                writeUtc = File.GetLastWriteTimeUtc(path);
+            }
+            catch
+            {
+                writeUtc = DateTime.MinValue;
+            }
+
             return new SteamApp
             {
                 ManifestPath = path,
@@ -308,7 +325,8 @@ public static class SteamScanner
                 BytesToDownload = Num(text, "BytesToDownload"),
                 BytesDownloaded = Num(text, "BytesDownloaded"),
                 BytesToStage = Num(text, "BytesToStage"),
-                BytesStaged = Num(text, "BytesStaged")
+                BytesStaged = Num(text, "BytesStaged"),
+                ManifestWriteUtc = writeUtc
             };
         }
         catch

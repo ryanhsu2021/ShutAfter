@@ -22,3 +22,6 @@ desktop.ini
 
 # 临时发布说明（不入库）
 .release-notes.md
+
+# 界面校对截图（--shot 产物）
+shot/

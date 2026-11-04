@@ -1,1 +1,0 @@
-root=512.0x708.0 dpiScale=1.500 px=1024x1416 workarea=2560x1392

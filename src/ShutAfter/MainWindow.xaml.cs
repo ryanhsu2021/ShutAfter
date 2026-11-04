@@ -517,7 +517,7 @@ public partial class MainWindow : Window
         // 等待阶段的秒数不展示，也不该触发重绘
         var idleKey = s.State is MonitorState.Waiting or MonitorState.Idle ? 0 : s.IdleSeconds;
         var signature = string.Join("|", s.State, s.Headline, s.Detail, s.Reason, s.Volume,
-            s.SpeedBytes, (int)(s.Progress * 400), (int)(s.DownloadProgress * 400), idleKey);
+            s.SpeedBytes, (int)(s.Progress * 1000), (int)(s.DownloadProgress * 1000), idleKey);
         if (signature == _lastSignature) return;
         _lastSignature = signature;
 
@@ -538,8 +538,11 @@ public partial class MainWindow : Window
         RingValue.Text = s.State switch
         {
             MonitorState.Waiting or MonitorState.Idle => "—",
+            // 下载进度带一位小数：138 GB 的包每涨 1% 要十几分钟，整数位看不出在动
+            _ when hasDownload => (Math.Clamp(ringValue, 0, 1) * 100).ToString("0.0") + "%",
             _ => ((int)Math.Round(Math.Clamp(ringValue, 0, 1) * 100)) + "%"
         };
+        RingValue.FontSize = hasDownload ? 14.5 : 17;
 
         RingCaption.Text = s.State switch
         {

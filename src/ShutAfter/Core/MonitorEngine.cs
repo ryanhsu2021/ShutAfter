@@ -100,6 +100,14 @@ public sealed class MonitorEngine : IDisposable
     /// <summary>每个 appid 上一次的进度快照，用于判断"是否还有增长"。</summary>
     private readonly Dictionary<string, (long Downloaded, long Staged)> _steamPrev = new(StringComparer.OrdinalIgnoreCase);
 
+    // Steam 只在分段完成 / 暂停 / 校验时才重写 appmanifest，实测可以一个多小时不更新，
+    // 光读它会让界面上的百分比几十分钟纹丝不动。所以拿它的值当锚点，
+    // 再用 content_log 里的真实速率按秒累加，manifest 一旦刷新就用真实值重新校准。
+    private string _steamRatioAppId = "";
+    private long _steamAnchorBytes;
+    private long _steamExtraBytes;
+    private DateTime _steamAccrualAt = DateTime.MinValue;
+
     public event Action<EngineStatus>? StatusChanged;
     public event Action<PowerAction>? Completed;
 
@@ -129,6 +137,10 @@ public sealed class MonitorEngine : IDisposable
         _steamAliveAt = DateTime.MinValue;
         _probeAt = DateTime.MinValue;
         _lastTotal = -1;
+        _steamRatioAppId = "";
+        _steamAnchorBytes = 0;
+        _steamExtraBytes = 0;
+        _steamAccrualAt = DateTime.MinValue;
 
         if (_cfg.WatchMode == WatchMode.Folder)
         {
@@ -306,12 +318,6 @@ public sealed class MonitorEngine : IDisposable
         steamAlive && (downloading || anyAppGrew);
 
     /// <summary>下载完成度。manifest 在下载期间很少刷新，拿不到就返回 -1，不伪造百分比。</summary>
-    private static double SteamRatio(SteamApp app)
-    {
-        if (app.BytesToDownload <= 0 || app.BytesDownloaded <= 0) return -1;
-        return (double)app.BytesDownloaded / app.BytesToDownload;
-    }
-
     private void TickSteam(DateTime now)
     {
         if (_steamLibs.Count == 0 || (now - _steamLibsAt).TotalSeconds > 120)
@@ -377,9 +383,12 @@ public sealed class MonitorEngine : IDisposable
                 : logFresh ? $"队列已无下载活动（{pending.Count} 个任务处于暂停/排队）"
                 : "超过 2 分钟无速率回报，判定已停止";
 
+            var curBytes = SteamLiveBytes(cur, now, busyAll ? liveSpeed : 0);
+
             Advance(busyAll, whyAll, now,
                 busyAll ? "正在下载 " + cur.Name : "队列已无下载活动",
-                SteamVolume(cur), liveSpeed, busyAll ? SteamRatio(cur) : -1);
+                SteamVolume(cur, curBytes), liveSpeed,
+                busyAll ? SteamRatio(curBytes, cur.BytesToDownload) : -1);
             return;
         }
 
@@ -407,20 +416,65 @@ public sealed class MonitorEngine : IDisposable
         if (app.CachedBytes > 0 || app.BytesDownloaded > 0)
             _hasSeenActivity = true;
 
+        var appBytes = SteamLiveBytes(app, now, busy ? liveSpeed : 0);
+
         Advance(busy, why, now,
             busy ? (downloading ? "正在下载 " + app.Name : "正在安装/校验 " + app.Name)
                  : (app.HasStaging ? "下载已暂停：" + app.Name : "下载已结束：" + app.Name),
-            SteamVolume(app), liveSpeed, busy ? SteamRatio(app) : -1);
+            SteamVolume(app, appBytes), liveSpeed,
+            busy ? SteamRatio(appBytes, app.BytesToDownload) : -1);
     }
 
-    private static string SteamVolume(SteamApp app)
+    private static string SteamVolume(SteamApp app, long downloaded)
     {
-        if (app.BytesToDownload > 0 && app.BytesDownloaded > 0)
-            return FormatSize(app.BytesDownloaded) + " / " + FormatSize(app.BytesToDownload);
+        if (app.BytesToDownload > 0 && downloaded > 0)
+            return FormatSize(downloaded) + " / " + FormatSize(app.BytesToDownload);
 
         if (app.CachedBytes > 0) return "已缓存 " + FormatSize(app.CachedBytes);
         if (app.BytesToDownload > 0) return "目标 " + FormatSize(app.BytesToDownload);
         return "";
+    }
+
+    /// <summary>
+    /// 推算当前已下载字节。manifest 的 BytesDownloaded 在下载期间可能一两个小时不刷新，
+    /// 直接用它，界面百分比就会长时间停住；这里改成「manifest 当锚点 + 速率按秒累加」，
+    /// Steam 一旦写入新值就立刻用真实值重新校准，误差不会一直累积。
+    /// </summary>
+    private long SteamLiveBytes(SteamApp app, DateTime now, long speedBytes)
+    {
+        if (!string.Equals(_steamRatioAppId, app.AppId, StringComparison.OrdinalIgnoreCase))
+        {
+            // 换了监控目标：锚点重来，上一个任务的累加量不能带过来
+            _steamRatioAppId = app.AppId;
+            _steamAnchorBytes = app.BytesDownloaded;
+            _steamExtraBytes = 0;
+            _steamAccrualAt = DateTime.MinValue;
+        }
+        else if (app.BytesDownloaded > _steamAnchorBytes)
+        {
+            // Steam 写了新值，以它为准，丢掉推算的部分
+            _steamAnchorBytes = app.BytesDownloaded;
+            _steamExtraBytes = 0;
+        }
+
+        if (speedBytes > 0 && _steamAccrualAt != DateTime.MinValue)
+        {
+            var dt = (now - _steamAccrualAt).TotalSeconds;
+
+            // 只在正常采样间隔内累加：机器休眠回来后的巨大间隔不能一口气补进去
+            if (dt > 0 && dt < 10) _steamExtraBytes += (long)(speedBytes * dt);
+        }
+
+        _steamAccrualAt = now;
+
+        var total = _steamAnchorBytes + _steamExtraBytes;
+        return app.BytesToDownload > 0 ? Math.Min(total, app.BytesToDownload) : total;
+    }
+
+    private static double SteamRatio(long bytes, long toDownload)
+    {
+        if (toDownload <= 0 || bytes <= 0) return -1;
+        return Math.Clamp((double)bytes / toDownload, 0, 1);
     }
 
     /// <summary>Steam 进程存活检查有 5 秒缓存：这个信息不需要秒级实时，枚举进程却要几百微秒。</summary>

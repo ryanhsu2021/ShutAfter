@@ -28,6 +28,7 @@ internal static class Program
             CaseK_PowerSafety();
             CaseL_SteamQueueBusy();
             CaseM_ManifestCache();
+            CaseN_SteamProgressAccrual();
         }
         finally
         {
@@ -354,6 +355,59 @@ internal static class Program
 
         Check("L4 Steam 已退出 → 不忙",
             !MonitorEngine.SteamQueueBusy(false, true, true), "busy=false");
+    }
+
+    private static void CaseN_SteamProgressAccrual()
+    {
+        Console.WriteLine("[N] Steam 进度推算：manifest 不刷新时也要继续上涨，且不回退、不超 100%");
+
+        SteamLog.TryGetRate(out var rate, out var stamp, out var fresh);
+        if (!fresh || rate < 100 * 1024)
+        {
+            Console.WriteLine("  SKIP  当前没有 Steam 下载");
+            return;
+        }
+
+        var cfg = new AppConfig
+        {
+            WatchMode = WatchMode.Steam,
+            SteamAppId = "",
+            QuietSeconds = 90,
+            GraceSeconds = 60,
+            DrillMode = true,
+            Action = PowerAction.NotifyOnly
+        };
+
+        var eng = new MonitorEngine(cfg);
+        var samples = new System.Collections.Generic.List<double>();
+        eng.StatusChanged += s =>
+        {
+            if (s.DownloadProgress >= 0) samples.Add(s.DownloadProgress);
+        };
+        eng.Start();
+
+        // 12 秒 ≈ 12 个采样；这段区间 manifest 通常一动不动，正是要验证的场景
+        Thread.Sleep(12000);
+        eng.Dispose();
+
+        if (samples.Count < 5)
+        {
+            Console.WriteLine($"  SKIP  采样太少（{samples.Count} 条）");
+            return;
+        }
+
+        var back = 0;
+        for (var i = 1; i < samples.Count; i++)
+            if (samples[i] < samples[i - 1] - 1e-9) back++;
+
+        var first = samples.First();
+        var last = samples.Last();
+
+        Console.WriteLine($"        {samples.Count} 个采样，{first:P3} → {last:P3}（日志速率行 {stamp:HH:mm:ss}）");
+
+        Check("N1 进度不回退", back == 0, $"回退 {back} 次");
+        Check("N2 manifest 未刷新时进度仍在上涨", last > first, $"{first:P3} → {last:P3}");
+        Check("N3 不越过 100%", last <= 1.0, last.ToString("P2"));
     }
 
     private static void CaseM_ManifestCache()

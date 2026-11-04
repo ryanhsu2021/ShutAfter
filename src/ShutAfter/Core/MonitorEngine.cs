@@ -379,7 +379,7 @@ public sealed class MonitorEngine : IDisposable
 
             Advance(busyAll, whyAll, now,
                 busyAll ? "正在下载 " + cur.Name : "队列已无下载活动",
-                SteamVolume(cur), liveSpeed, SteamRatio(cur));
+                SteamVolume(cur), liveSpeed, busyAll ? SteamRatio(cur) : -1);
             return;
         }
 
@@ -410,7 +410,7 @@ public sealed class MonitorEngine : IDisposable
         Advance(busy, why, now,
             busy ? (downloading ? "正在下载 " + app.Name : "正在安装/校验 " + app.Name)
                  : (app.HasStaging ? "下载已暂停：" + app.Name : "下载已结束：" + app.Name),
-            SteamVolume(app), liveSpeed, SteamRatio(app));
+            SteamVolume(app), liveSpeed, busy ? SteamRatio(app) : -1);
     }
 
     private static string SteamVolume(SteamApp app)

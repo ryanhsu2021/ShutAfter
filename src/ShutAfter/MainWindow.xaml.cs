@@ -517,28 +517,34 @@ public partial class MainWindow : Window
         // 等待阶段的秒数不展示，也不该触发重绘
         var idleKey = s.State is MonitorState.Waiting or MonitorState.Idle ? 0 : s.IdleSeconds;
         var signature = string.Join("|", s.State, s.Headline, s.Detail, s.Reason, s.Volume,
-            s.SpeedBytes, (int)(s.Progress * 400), idleKey);
+            s.SpeedBytes, (int)(s.Progress * 400), (int)(s.DownloadProgress * 400), idleKey);
         if (signature == _lastSignature) return;
         _lastSignature = signature;
 
         StateText.Text = s.Headline;
         StateDetail.Text = string.IsNullOrWhiteSpace(s.Detail) ? "—" : s.Detail;
 
+        // 圆环显示什么：拿得到真实下载进度就显示下载完成度（下载中静默恒为 0，
+        // 若继续显示静默进度，整个下载过程环都停在 0%，看起来像没生效）。
+        // 拿不到（文件夹 / 软件模式）才退回静默计时进度。
+        var hasDownload = s.DownloadProgress >= 0 && s.State == MonitorState.Monitoring;
+        var ringValue = hasDownload ? s.DownloadProgress : s.Progress;
+
         var brush = MakeBrush(s.Accent);
         StateDot.Background = brush;
         Ring.AccentBrush = brush;
-        AnimateRing(s.Progress);
+        AnimateRing(ringValue);
 
         RingValue.Text = s.State switch
         {
-            MonitorState.Waiting => "—",
-            _ => ((int)Math.Round(s.Progress * 100)) + "%"
+            MonitorState.Waiting or MonitorState.Idle => "—",
+            _ => ((int)Math.Round(Math.Clamp(ringValue, 0, 1) * 100)) + "%"
         };
 
         RingCaption.Text = s.State switch
         {
             MonitorState.Waiting => "待开始",
-            MonitorState.Monitoring => "静默",
+            MonitorState.Monitoring => hasDownload ? "下载" : "静默",
             MonitorState.Countdown => "倒计时",
             MonitorState.Finished => "完成",
             _ => "待机"
@@ -559,7 +565,17 @@ public partial class MainWindow : Window
 
     private void AnimateRing(double target)
     {
-        var anim = new DoubleAnimation(Math.Clamp(target, 0, 1), TimeSpan.FromMilliseconds(420))
+        target = Math.Clamp(target, 0, 1);
+
+        // 校对模式直接落到终值，否则截图抓到的永远是动画第一帧（看起来像环没生效）
+        if (App.ShotMode)
+        {
+            Ring.BeginAnimation(ProgressRing.ValueProperty, null);
+            Ring.Value = target;
+            return;
+        }
+
+        var anim = new DoubleAnimation(target, TimeSpan.FromMilliseconds(420))
         {
             EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
         };

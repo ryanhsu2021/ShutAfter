@@ -20,11 +20,15 @@ public partial class App : Application
     internal static AppConfig Config { get; private set; } = new();
     internal MainWindow? Panel { get; private set; }
 
+    /// <summary>界面校对模式：跳过动画，窗口按最终数值一次性渲染。</summary>
+    internal static bool ShotMode { get; private set; }
+
     protected override void OnStartup(StartupEventArgs e)
     {
         // 界面校对模式：把窗口渲染成 PNG 后退出（仅开发时使用，不启动托盘）
         if (e.Args.Length >= 2 && e.Args[0] == "--shot")
         {
+            ShotMode = true;
             CaptureShot(e.Args[1], e.Args.Length > 2 ? e.Args[2] : "");
             return;
         }

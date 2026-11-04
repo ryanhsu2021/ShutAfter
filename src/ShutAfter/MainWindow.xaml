@@ -466,7 +466,7 @@
                     <Border Background="{StaticResource Surface}" BorderBrush="{StaticResource Line}"
                             BorderThickness="1" CornerRadius="14" Padding="16,13,16,12">
                         <StackPanel>
-                            <Grid Height="66">
+                            <Grid Height="72">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*"/>
                                     <ColumnDefinition Width="Auto"/>
@@ -488,7 +488,7 @@
                                                TextTrimming="CharacterEllipsis" LineHeight="17"/>
                                 </StackPanel>
 
-                                <Grid Grid.Column="1" Width="68" Height="68">
+                                <Grid Grid.Column="1" Width="66" Height="66" VerticalAlignment="Center">
                                     <ui:ProgressRing x:Name="Ring" Value="0" StrokeThickness="5"
                                                      TrackBrush="#1E222E" AccentBrush="{StaticResource Accent}"/>
                                     <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">

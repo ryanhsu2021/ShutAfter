@@ -19,3 +19,6 @@ tools/preview/
 # 系统
 Thumbs.db
 desktop.ini
+
+# 临时发布说明（不入库）
+.release-notes.md

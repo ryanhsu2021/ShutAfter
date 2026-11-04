@@ -26,7 +26,7 @@ public sealed class AppConfig
     public string ProgramName { get; set; } = "";
     public string SteamAppId { get; set; } = "";
     public string WatchPath { get; set; } = "";
-    public int QuietSeconds { get; set; } = 90;
+    public int QuietSeconds { get; set; } = 300;
     public int GraceSeconds { get; set; } = 60;
     public PowerAction Action { get; set; } = PowerAction.Shutdown;
     public bool DrillMode { get; set; } = true;

@@ -1,0 +1,21 @@
+# 构建产物
+bin/
+obj/
+dist/
+portable/
+*.pdb
+*.user
+
+# IDE
+.vs/
+.idea/
+
+# 图标生成预览
+tools/preview/
+
+# 工作区私有数据（笔记、会话记录）
+.workbuddy/
+
+# 系统
+Thumbs.db
+desktop.ini

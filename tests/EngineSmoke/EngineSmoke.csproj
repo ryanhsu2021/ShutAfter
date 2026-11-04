@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AssemblyName>EngineSmoke</AssemblyName>
+    <UseWindowsForms>true</UseWindowsForms>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="../../src/ShutAfter/Core/MonitorEngine.cs" />
+    <Compile Include="../../src/ShutAfter/Core/AppConfig.cs" />
+    <Compile Include="../../src/ShutAfter/Core/NativeMethods.cs" />
+    <Compile Include="../../src/ShutAfter/Core/SteamWatcher.cs" />
+    <Compile Include="../../src/ShutAfter/Core/SteamLog.cs" />
+    <Compile Include="../../src/ShutAfter/Core/PowerController.cs" />
+    <Compile Include="../../src/ShutAfter/Core/ProgramScanner.cs" />
+  </ItemGroup>
+
+</Project>

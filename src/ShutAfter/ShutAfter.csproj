@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>ShutAfter</AssemblyName>
+    <RootNamespace>ShutAfter</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\ShutAfter.ico</ApplicationIcon>
+    <Version>1.0.0</Version>
+    <AssemblyTitle>ShutAfter</AssemblyTitle>
+    <Product>ShutAfter</Product>
+    <Description>监控下载完成并自动关机 / 睡眠 / 休眠</Description>
+    <Company>ShutAfter</Company>
+    <SatelliteResourceLanguages>zh-Hans</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 同一份 ico 既做 exe 图标，也内嵌给托盘/窗口运行时读取 -->
+    <EmbeddedResource Include="Assets\ShutAfter.ico" LogicalName="ShutAfter.ico" />
+  </ItemGroup>
+
+  <!-- 发布产物只留 exe：不要调试符号（需要排错时用 -p:DebugType=portable 单独指定） -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+
+</Project>

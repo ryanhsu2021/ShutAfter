@@ -1,0 +1,142 @@
+# ShutAfter
+
+**下载完成，自动关机。**
+
+给那些「下完不会自己关机」的下载软件，补上最后一个按钮。
+
+---
+
+## 为什么做这个
+
+大多数下载工具都不会在任务结束后关机：
+
+- 浏览器（Chrome / Edge / Firefox）下完就停在那，电脑亮一整夜
+- 迅雷、IDM、部分网盘客户端有这功能，但常被会员/设置项藏起来
+- 一些商店、启动器、内部工具根本没有这个概念
+
+夜里挂机下几十 GB，机器空转七八个小时是常态。ShutAfter 常驻托盘，盯着下载有没有真正结束，结束后按你设定的方式关机 / 睡眠 / 休眠。
+
+## 它怎么判断「下完了」
+
+**刻意不用网卡流量**。流量只能证明「此刻没在传」，不能证明「传完了」——分片间隔、服务器限流、HTTP 连接复用都会让流量短暂归零，按流量判定会在下载到一半时把电脑关掉。
+
+程序内置三种监控对象，按软件类型选：
+
+| 模式 | 适用对象 | 判定依据 |
+|---|---|---|
+| **文件夹** | 浏览器下载、任何落盘工具 | 下载器临时文件后缀（`.crdownload` / `.part` / `.td` / `.!qb` / `.xltd` …）、目录体积与文件数变化、**独占句柄试探**（能独占打开 = 没有进程在写） |
+| **软件** | 迅雷 / IDM / 网盘客户端 / 各类启动器 | 进程退出，或该进程磁盘写入连续静止 |
+| **Steam** | Steam 游戏 | 直接读 `steamapps\appmanifest_<appid>.acf` 的 `StateFlags`、暂存目录，以及 `logs\content_log.txt` 里的真实下载速率 |
+
+Steam 模式不是多余的：Steam 会**预分配**下载文件，文件体积和修改时间在下载过程中都不变，靠文件夹或进程 IO 判断会在解包阶段误关机。
+
+## 防误判设计
+
+误判的代价是「你还没下完，电脑被关了」，所以判定逻辑偏保守：
+
+1. **多信号合并，不是单选**：任一信号活跃即视为未完成
+2. **两级等待**：静默 `N` 秒只进入倒计时，再等 `M` 秒才执行；期间任何一路信号恢复就自动取消
+3. **基线快照**：开始监控时目录里已有的文件不算"活动"，从没观察到写入就永不触发
+4. **系统级撤销窗口**：执行 `shutdown /s /t 30`，30 秒内 `shutdown /a` 可中止
+5. **演练模式**：默认开启，第一次跑只弹提醒不动系统
+
+## 下载与安装
+
+到 [Releases](../../releases) 下载，二选一：
+
+| 文件 | 说明 |
+|---|---|
+| `ShutAfter-standalone.exe` | **推荐**。免安装、免运行时，单文件直接双击 |
+| `ShutAfter.exe` | 精简版，约 400 KB，需要先装 [.NET 8 桌面运行时](https://dotnet.microsoft.com/download/dotnet/8.0) |
+
+程序没有安装包，不需要管理员权限（Steam 模式读注册表当前用户分支也不需要）。
+
+## 用法
+
+1. 双击启动，窗口打开后在托盘常驻
+2. 顶部选监控对象：**软件** / **Steam** / **文件夹**
+3. 设定「静默」与「宽限」秒数（默认 300 / 60）
+4. 选择结束后做什么：关机 / 睡眠 / 休眠 / 仅提醒
+5. 点「开始监控」
+
+推荐第一次先保持**演练模式**勾选，完整跑一次，确认倒计时和提醒都符合预期，再取消勾选。
+
+### 参数怎么调
+
+| 参数 | 含义 | 建议 |
+|---|---|---|
+| 静默 | 多久没有任何活动算"停了" | 下载器稳定用 300s；经常手动暂停建议 600s 以上 |
+| 宽限 | 停稳之后还等多久才动手 | 60s 足够，这是给"误判"的最后缓冲 |
+
+### 浏览器下载怎么设置
+
+选**文件夹**模式，指向浏览器默认下载目录（如 `C:\Users\你\Downloads`）。不要用软件模式监控浏览器——浏览器常驻且持续写缓存，永远等不到静止。
+
+### Steam 怎么设置
+
+选 **Steam** 模式，程序会自动定位所有库目录（含多盘库），列出正在下载的任务。选「任意任务」表示任一任务完成即触发。
+
+## 已知限制
+
+- **Steam 速率是 60 秒粒度**：数字来自 Steam 自己写的日志，真实但不逐秒跳动
+- **手动暂停会被判定为完成**：迅雷/IDM 暂停后进程仍在但 IO 为 0，静默时间一到就会执行。中途要暂停请先点「停止监控」
+- **文件夹模式最多统计 3000 个文件**：超大目录（如整个盘）请改用软件模式
+- **睡眠走 `SetSuspendState`**：系统若启用了休眠，会被当作休眠处理，这是 Windows 的既有行为
+
+## 从源码构建
+
+需要 .NET 8 SDK。
+
+```bash
+# 日常编译
+cd src/ShutAfter
+dotnet build -c Release
+
+# 精简版（需目标机器装 .NET 8 桌面运行时）
+dotnet publish -c Release -r win-x64 --self-contained false \
+  -p:PublishSingleFile=true -o ../../dist
+
+# 便携版（免运行时）
+dotnet publish -c Release -r win-x64 --self-contained true \
+  -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true \
+  -p:IncludeNativeLibrariesForSelfExtract=true -o ../../portable
+```
+
+判定引擎有独立的冒烟测试（不需要管理员权限）：
+
+```bash
+cd tests/EngineSmoke
+dotnet run -c Release
+```
+
+覆盖：完整下载流程触发、空目录不误触发、倒计时中恢复写入自动取消、Steam 清单与日志解析、扫描性能。
+
+## 项目结构
+
+```
+src/ShutAfter/
+  Core/
+    MonitorEngine.cs   判定状态机（三种模式共用一个引擎）
+    AppConfig.cs       配置与持久化（原子写入）
+    SteamWatcher.cs    Steam 库/清单解析
+    SteamLog.cs        content_log 速率读取
+    ProgramScanner.cs  运行中程序枚举
+    PowerController.cs 电源动作执行（检查退出码）
+    IconFactory.cs     内嵌图标加载
+    NativeMethods.cs   Win32 调用
+  Assets/ShutAfter.ico 图标（多尺寸，同时用于 exe 与运行时）
+tests/EngineSmoke/     判定引擎冒烟测试
+tools/GenIcon.ps1      图标生成脚本
+```
+
+## 图标
+
+`tools/GenIcon.ps1` 用 GDI+ 现场绘制 16–256 共 9 种尺寸的 ico：蓝色渐变圆角方块 + 下载箭头 + 时钟徽章，≤24px 自动简化为纯箭头。改配色或形状后重跑即可：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\GenIcon.ps1
+```
+
+## 许可
+
+MIT
